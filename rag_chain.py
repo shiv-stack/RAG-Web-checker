@@ -3,18 +3,14 @@ LangChain Vector Store and Retrieval-Augmented Generation (RAG) pipeline
 powered by Google Gemini and FAISS.
 """
 
-import json
 from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain.chains import create_history_aware_retriever, create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
 
 
 CUSTOM_HEADERS = {
