@@ -313,10 +313,10 @@ with col_model:
     model_choice = st.selectbox(
         "Model",
         options=[
-            "gemini-2.0-flash-lite",
-            "gemini-2.0-flash",
-            "gemini-2.5-flash-preview-05-20",
-            "gemini-2.5-pro-preview-05-06",
+            "gemini-3.5-flash-lite",
+            "gemini-3.5-flash",
+            "gemini-3.8-flash",
+            "gemini-pro-latest",
         ],
         index=0,
         help="Lighter models are faster and cost-effective. Pro models give deeper reasoning.",
