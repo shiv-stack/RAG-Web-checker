@@ -145,7 +145,7 @@ class WebsiteRAG:
         vector_store: FAISS,
         analysis_data: Dict[str, Any],
         api_key: str,
-        model_name: str = "gemini-3.5-flash-lite",
+        model_name: str = "gemini-2.0-flash-lite",
         temperature: float = 0.2,
     ):
         self.vector_store = vector_store
@@ -217,7 +217,7 @@ def create_website_rag_chain(
     vector_store: FAISS,
     analysis_data: Dict[str, Any],
     api_key: str,
-    model_name: str = "gemini-3.5-flash-lite",
+    model_name: str = "gemini-2.0-flash-lite",
     temperature: float = 0.2,
 ) -> WebsiteRAG:
     """Create and return a configured WebsiteRAG instance."""
