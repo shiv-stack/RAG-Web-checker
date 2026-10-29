@@ -3,12 +3,27 @@ Web scraping, metadata extraction, WHOIS lookup, and tech stack detection.
 """
 
 import re
+import socket
 from typing import Any, Dict, List
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
 import requests
+from requests.adapters import HTTPAdapter
 import whois
+
+# ---------------------------------------------------------------------------
+# Force IPv4 on platforms where IPv6 is unreachable (e.g. Render free tier)
+# ---------------------------------------------------------------------------
+_original_getaddrinfo = socket.getaddrinfo
+
+
+def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    """Override getaddrinfo to prefer IPv4 (AF_INET), avoiding Errno 101 on Render."""
+    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+
+
+socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 
 # Default headers to mimic a modern browser and prevent 403 Forbidden responses
@@ -122,7 +137,12 @@ def extract_metadata_and_html(url: str, timeout: int = 12) -> Dict[str, Any]:
     }
 
     try:
-        response = requests.get(
+        session = requests.Session()
+        adapter = HTTPAdapter(max_retries=3)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+
+        response = session.get(
             clean_url,
             headers=DEFAULT_HEADERS,
             timeout=timeout,
