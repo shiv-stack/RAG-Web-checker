@@ -19,6 +19,7 @@ import whois
 try:
     import urllib3.util.connection as urllib3_cn
     urllib3_cn.HAS_IPV6 = False
+    urllib3_cn.allowed_gai_family = lambda: urllib3_cn.socket.AF_INET
 except Exception:
     pass
 
@@ -155,9 +156,10 @@ def _generate_candidate_urls(clean_url: str) -> List[str]:
 
 def _fetch_via_proxy(clean_url: str, domain: str) -> Optional[Dict[str, Any]]:
     """
-    Fallback reader proxy (via Jina Reader) to bypass datacenter IP blocks,
+    Fallback reader proxy to bypass datacenter IP blocks,
     regional firewalls, and anti-bot protection when deployed on cloud platforms.
     """
+    # 1. Try Jina Reader
     try:
         jina_url = f"https://r.jina.ai/{clean_url}"
         headers = {
@@ -190,6 +192,31 @@ def _fetch_via_proxy(clean_url: str, domain: str) -> Optional[Dict[str, Any]]:
             }
     except Exception:
         pass
+
+    # 2. Try AllOrigins public proxy
+    try:
+        ao_url = f"https://api.allorigins.win/raw?url={clean_url}"
+        res = requests.get(ao_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=(6, 15))
+        if res.status_code == 200 and len(res.text.strip()) > 80:
+            soup = BeautifulSoup(res.text, "html.parser")
+            title_tag = soup.find("title")
+            title = title_tag.string.strip() if title_tag and title_tag.string else domain
+            return {
+                "url": clean_url,
+                "domain": domain,
+                "status_code": 200,
+                "title": title,
+                "description": "Fetched via redundant proxy",
+                "author": "Not specified",
+                "copyright": "None detected",
+                "og_image": None,
+                "raw_html": res.text,
+                "headers": dict(res.headers),
+                "error": None,
+            }
+    except Exception:
+        pass
+
     return None
 
 
