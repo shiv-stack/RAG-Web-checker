@@ -13,17 +13,14 @@ from requests.adapters import HTTPAdapter
 import whois
 
 # ---------------------------------------------------------------------------
-# Force IPv4 on platforms where IPv6 is unreachable (e.g. Render free tier)
+# Force IPv4 in urllib3 to prevent [Errno 101] Network is unreachable on Render,
+# while preserving standard socket DNS resolution for APIs and proxies.
 # ---------------------------------------------------------------------------
-_original_getaddrinfo = socket.getaddrinfo
-
-
-def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
-    """Override getaddrinfo to prefer IPv4 (AF_INET), avoiding Errno 101 on Render."""
-    return _original_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
-
-
-socket.getaddrinfo = _ipv4_only_getaddrinfo
+try:
+    import urllib3.util.connection as urllib3_cn
+    urllib3_cn.HAS_IPV6 = False
+except Exception:
+    pass
 
 
 # Default headers to mimic a modern browser and prevent 403/timeout responses
@@ -81,7 +78,14 @@ def fetch_whois_data(domain: str) -> Dict[str, Any]:
     }
 
     try:
-        query_res = whois.whois(domain)
+        # Prevent WHOIS from hanging on cloud platforms that block outbound port 43
+        old_timeout = socket.getdefaulttimeout()
+        socket.setdefaulttimeout(4)
+        try:
+            query_res = whois.whois(domain)
+        finally:
+            socket.setdefaulttimeout(old_timeout)
+
         if query_res:
             # Registrar
             if query_res.get("registrar"):
@@ -149,11 +153,51 @@ def _generate_candidate_urls(clean_url: str) -> List[str]:
     return list(dict.fromkeys(candidates))
 
 
+def _fetch_via_proxy(clean_url: str, domain: str) -> Optional[Dict[str, Any]]:
+    """
+    Fallback reader proxy (via Jina Reader) to bypass datacenter IP blocks,
+    regional firewalls, and anti-bot protection when deployed on cloud platforms.
+    """
+    try:
+        jina_url = f"https://r.jina.ai/{clean_url}"
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/125.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/plain, text/html",
+            "X-No-Cache": "true",
+        }
+        res = requests.get(jina_url, headers=headers, timeout=(6, 15))
+        if res.status_code == 200 and len(res.text.strip()) > 80:
+            lines = [l.strip() for l in res.text.splitlines() if l.strip()]
+            title = lines[0][:100] if lines else f"{domain}"
+            desc = " ".join(lines[1:5])[:250] if len(lines) > 1 else "Extracted page content"
+
+            return {
+                "url": clean_url,
+                "domain": domain,
+                "status_code": 200,
+                "title": title,
+                "description": desc,
+                "author": "Not specified",
+                "copyright": "None detected",
+                "og_image": None,
+                "raw_html": f"<html><head><title>{title}</title></head><body><main>{res.text}</main></body></html>",
+                "headers": dict(res.headers),
+                "error": None,
+            }
+    except Exception:
+        pass
+    return None
+
+
 def extract_metadata_and_html(url: str, timeout: int = 12) -> Dict[str, Any]:
     """
     Fetch raw HTML from target URL and extract structured metadata:
     Title, Meta description, Author/Publisher, OpenGraph tags, and copyright notice.
-    Automatically falls back across www/non-www and http/https candidates.
+    Automatically handles datacenter IP blocking, SSL issues, and cloud firewall timeouts.
     """
     clean_url = sanitize_url(url)
     domain = extract_domain(clean_url)
@@ -171,7 +215,6 @@ def extract_metadata_and_html(url: str, timeout: int = 12) -> Dict[str, Any]:
         "error": None,
     }
 
-    candidate_urls = _generate_candidate_urls(clean_url)
     session = requests.Session()
     adapter = HTTPAdapter(max_retries=1)
     session.mount("https://", adapter)
@@ -181,66 +224,67 @@ def extract_metadata_and_html(url: str, timeout: int = 12) -> Dict[str, Any]:
     last_error = None
     successful_url = clean_url
 
-    for target in candidate_urls:
+    # 1. Primary Direct Attempt
+    try:
+        res = session.get(
+            clean_url,
+            headers=DEFAULT_HEADERS,
+            timeout=(5, 10),
+            allow_redirects=True,
+            verify=True,
+        )
+        if res.status_code < 400:
+            response = res
+            successful_url = res.url or clean_url
+    except requests.exceptions.SSLError:
         try:
-            # (6s connect timeout, 12s read timeout) prevents waiting indefinitely on dropped ports
             res = session.get(
-                target,
+                clean_url,
                 headers=DEFAULT_HEADERS,
-                timeout=(6, 12),
+                timeout=(5, 10),
                 allow_redirects=True,
-                verify=True,
+                verify=False,
             )
-            if res.status_code < 500:
+            if res.status_code < 400:
                 response = res
-                successful_url = res.url or target
-                break
-        except requests.exceptions.SSLError:
-            # Retry with verify=False if certificate validation is broken on regional sites
+                successful_url = res.url or clean_url
+        except Exception as e:
+            last_error = e
+    except Exception as e:
+        last_error = e
+
+    # 2. If direct attempt failed or timed out (cloud datacenter block), try Proxy Fallback
+    if response is None:
+        proxy_result = _fetch_via_proxy(clean_url, domain)
+        if proxy_result:
+            return proxy_result
+
+        # 3. Secondary candidate attempt (e.g. toggling www)
+        candidates = _generate_candidate_urls(clean_url)
+        for target in candidates:
+            if target == clean_url:
+                continue
             try:
                 res = session.get(
                     target,
                     headers=DEFAULT_HEADERS,
-                    timeout=(6, 12),
+                    timeout=(4, 8),
                     allow_redirects=True,
                     verify=False,
                 )
-                response = res
-                successful_url = res.url or target
-                break
+                if res.status_code < 400:
+                    response = res
+                    successful_url = res.url or target
+                    break
             except Exception as e:
                 last_error = e
                 continue
-        except Exception as e:
-            last_error = e
-            continue
 
+    # If all attempts failed
     if response is None:
-        # Fallback: Use Jina Reader proxy to bypass datacenter IP blocks, firewalls & timeouts
-        try:
-            jina_url = f"https://r.jina.ai/{clean_url}"
-            jina_res = session.get(
-                jina_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept": "text/plain, text/html",
-                },
-                timeout=(10, 20),
-            )
-            if jina_res.status_code == 200 and len(jina_res.text.strip()) > 50:
-                result["url"] = clean_url
-                result["domain"] = domain
-                result["status_code"] = 200
-                result["raw_html"] = f"<html><body>{jina_res.text}</body></html>"
-                result["title"] = f"{domain} (Retrieved via Proxy)"
-                result["description"] = jina_res.text[:250].strip()
-                return result
-        except Exception:
-            pass
-
         result["error"] = (
             f"Failed to retrieve {clean_url}: {str(last_error)}. "
-            "The target website server is unresponsive or actively blocking cloud connections."
+            "The target website is completely unresponsive or refusing all connections."
         )
         return result
 
