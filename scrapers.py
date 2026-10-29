@@ -216,9 +216,31 @@ def extract_metadata_and_html(url: str, timeout: int = 12) -> Dict[str, Any]:
             continue
 
     if response is None:
+        # Fallback: Use Jina Reader proxy to bypass datacenter IP blocks, firewalls & timeouts
+        try:
+            jina_url = f"https://r.jina.ai/{clean_url}"
+            jina_res = session.get(
+                jina_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "text/plain, text/html",
+                },
+                timeout=(10, 20),
+            )
+            if jina_res.status_code == 200 and len(jina_res.text.strip()) > 50:
+                result["url"] = clean_url
+                result["domain"] = domain
+                result["status_code"] = 200
+                result["raw_html"] = f"<html><body>{jina_res.text}</body></html>"
+                result["title"] = f"{domain} (Retrieved via Proxy)"
+                result["description"] = jina_res.text[:250].strip()
+                return result
+        except Exception:
+            pass
+
         result["error"] = (
             f"Failed to retrieve {clean_url}: {str(last_error)}. "
-            "The target website may be blocking cloud/datacenter IP addresses or dropping connections."
+            "The target website server is unresponsive or actively blocking cloud connections."
         )
         return result
 
