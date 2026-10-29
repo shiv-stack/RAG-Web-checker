@@ -26,16 +26,22 @@ def _ipv4_only_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
 socket.getaddrinfo = _ipv4_only_getaddrinfo
 
 
-# Default headers to mimic a modern browser and prevent 403 Forbidden responses
+# Default headers to mimic a modern browser and prevent 403/timeout responses
 DEFAULT_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/125.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
-    "Cache-Control": "no-cache",
+    "Accept-Encoding": "gzip, deflate",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
 }
 
 
@@ -116,15 +122,44 @@ def fetch_whois_data(domain: str) -> Dict[str, Any]:
     return whois_info
 
 
+def _generate_candidate_urls(clean_url: str) -> List[str]:
+    """Generate ordered list of fallback URLs (https -> www -> http)."""
+    parsed = urlparse(clean_url)
+    scheme = parsed.scheme or "https"
+    netloc = parsed.netloc or parsed.path
+    path = parsed.path if parsed.netloc else ""
+    query = f"?{parsed.query}" if parsed.query else ""
+    suffix = f"{path}{query}"
+
+    candidates = [clean_url]
+
+    # Try toggling 'www.'
+    if netloc.startswith("www."):
+        alt_netloc = netloc[4:]
+    else:
+        alt_netloc = f"www.{netloc}"
+    candidates.append(f"{scheme}://{alt_netloc}{suffix}")
+
+    # Fallback to plain http:// if https:// drops connections
+    if scheme == "https":
+        candidates.append(f"http://{netloc}{suffix}")
+        candidates.append(f"http://{alt_netloc}{suffix}")
+
+    # Deduplicate while preserving order
+    return list(dict.fromkeys(candidates))
+
+
 def extract_metadata_and_html(url: str, timeout: int = 12) -> Dict[str, Any]:
     """
     Fetch raw HTML from target URL and extract structured metadata:
     Title, Meta description, Author/Publisher, OpenGraph tags, and copyright notice.
+    Automatically falls back across www/non-www and http/https candidates.
     """
     clean_url = sanitize_url(url)
+    domain = extract_domain(clean_url)
     result = {
         "url": clean_url,
-        "domain": extract_domain(clean_url),
+        "domain": domain,
         "status_code": None,
         "title": "Untitled",
         "description": "No description found",
@@ -136,22 +171,64 @@ def extract_metadata_and_html(url: str, timeout: int = 12) -> Dict[str, Any]:
         "error": None,
     }
 
-    try:
-        session = requests.Session()
-        adapter = HTTPAdapter(max_retries=3)
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
+    candidate_urls = _generate_candidate_urls(clean_url)
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=1)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
 
-        response = session.get(
-            clean_url,
-            headers=DEFAULT_HEADERS,
-            timeout=timeout,
-            allow_redirects=True,
+    response = None
+    last_error = None
+    successful_url = clean_url
+
+    for target in candidate_urls:
+        try:
+            # (6s connect timeout, 12s read timeout) prevents waiting indefinitely on dropped ports
+            res = session.get(
+                target,
+                headers=DEFAULT_HEADERS,
+                timeout=(6, 12),
+                allow_redirects=True,
+                verify=True,
+            )
+            if res.status_code < 500:
+                response = res
+                successful_url = res.url or target
+                break
+        except requests.exceptions.SSLError:
+            # Retry with verify=False if certificate validation is broken on regional sites
+            try:
+                res = session.get(
+                    target,
+                    headers=DEFAULT_HEADERS,
+                    timeout=(6, 12),
+                    allow_redirects=True,
+                    verify=False,
+                )
+                response = res
+                successful_url = res.url or target
+                break
+            except Exception as e:
+                last_error = e
+                continue
+        except Exception as e:
+            last_error = e
+            continue
+
+    if response is None:
+        result["error"] = (
+            f"Failed to retrieve {clean_url}: {str(last_error)}. "
+            "The target website may be blocking cloud/datacenter IP addresses or dropping connections."
         )
-        result["status_code"] = response.status_code
-        result["headers"] = dict(response.headers)
-        result["raw_html"] = response.text
+        return result
 
+    result["url"] = successful_url
+    result["domain"] = extract_domain(successful_url)
+    result["status_code"] = response.status_code
+    result["headers"] = dict(response.headers)
+    result["raw_html"] = response.text
+
+    try:
         soup = BeautifulSoup(response.text, "html.parser")
 
         # 1. Page Title
@@ -196,9 +273,9 @@ def extract_metadata_and_html(url: str, timeout: int = 12) -> Dict[str, Any]:
         )
         if copyright_match:
             result["copyright"] = copyright_match.group(0).strip()
-
-    except requests.exceptions.RequestException as e:
-        result["error"] = f"Failed to retrieve {clean_url}: {str(e)}"
+    except Exception as e:
+        # Parsing error shouldn't fail the entire response
+        pass
 
     return result
 

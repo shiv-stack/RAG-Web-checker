@@ -24,31 +24,35 @@ CUSTOM_HEADERS = {
 
 def load_and_chunk_webpage(url: str, raw_html_fallback: Optional[str] = None) -> List[Document]:
     """
-    Scrape website content using WebBaseLoader.
-    Falls back to parsing provided raw HTML if WebBaseLoader fails or yields sparse content.
+    Parse text content from raw HTML fallback (to avoid redundant network requests),
+    or fall back to WebBaseLoader.
     Chunks text with RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150).
     """
     documents: List[Document] = []
 
-    try:
-        loader = WebBaseLoader(
-            web_paths=(url,),
-            header_template=CUSTOM_HEADERS,
-            verify_ssl=True,
-        )
-        documents = loader.load()
-    except Exception:
-        pass
+    # Prefer raw_html_fallback to avoid making a redundant outbound request
+    if raw_html_fallback and len(raw_html_fallback) > 100:
+        try:
+            soup = BeautifulSoup(raw_html_fallback, "html.parser")
+            for tag in soup(["script", "style", "noscript", "svg", "nav"]):
+                tag.decompose()
+            extracted_text = soup.get_text(separator="\n", strip=True)
+            if extracted_text and len(extracted_text) >= 100:
+                documents = [Document(page_content=extracted_text, metadata={"source": url})]
+        except Exception:
+            pass
 
-    # If documents is empty or too brief (<400 chars), extract comprehensive text from raw_html_fallback
-    combined_content = " ".join([d.page_content for d in documents]).strip()
-    if len(combined_content) < 400 and raw_html_fallback:
-        soup = BeautifulSoup(raw_html_fallback, "html.parser")
-        for tag in soup(["script", "style", "noscript", "svg", "nav"]):
-            tag.decompose()
-        extracted_text = soup.get_text(separator="\n", strip=True)
-        if extracted_text:
-            documents = [Document(page_content=extracted_text, metadata={"source": url})]
+    # If raw_html_fallback wasn't available or yielded sparse text, use WebBaseLoader
+    if not documents:
+        try:
+            loader = WebBaseLoader(
+                web_paths=(url,),
+                header_template=CUSTOM_HEADERS,
+                verify_ssl=False,
+            )
+            documents = loader.load()
+        except Exception:
+            pass
 
     if not documents or not any(d.page_content.strip() for d in documents):
         raise RuntimeError(f"Unable to extract readable text content from {url}.")
