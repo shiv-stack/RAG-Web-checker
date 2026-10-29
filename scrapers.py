@@ -4,7 +4,7 @@ Web scraping, metadata extraction, WHOIS lookup, and tech stack detection.
 
 import re
 import socket
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from bs4 import BeautifulSoup
