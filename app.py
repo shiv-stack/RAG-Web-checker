@@ -19,6 +19,7 @@ from scrapers import analyze_target_website, sanitize_url
 from rag_chain import (
     build_vector_store,
     create_website_rag_chain,
+    extract_text_from_llm_response,
     format_chat_history,
     load_and_chunk_webpage,
 )
@@ -606,7 +607,7 @@ with col_p4:
 # Render past messages
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+        st.markdown(extract_text_from_llm_response(message["content"]))
 
 # Process input
 user_prompt = st.chat_input("Ask a question about this website…") or preset_question
@@ -628,7 +629,8 @@ if user_prompt:
                         "input": user_prompt,
                         "chat_history": langchain_history,
                     })
-                    answer = response.get("answer", "No response generated.")
+                    raw_answer = response.get("answer", "No response generated.")
+                    answer = extract_text_from_llm_response(raw_answer)
                     message_placeholder.markdown(answer)
                     st.session_state.messages.append({"role": "assistant", "content": answer})
                 except Exception as err:

@@ -3,6 +3,7 @@ LangChain Vector Store and Retrieval-Augmented Generation (RAG) pipeline
 powered by Google Gemini and FAISS.
 """
 
+import ast
 from typing import Any, Dict, List, Optional
 from bs4 import BeautifulSoup
 from langchain_community.document_loaders import WebBaseLoader
@@ -141,6 +142,48 @@ def format_tech_context(analysis_data: Dict[str, Any]) -> str:
     return "\n".join(context_lines)
 
 
+def extract_text_from_llm_response(content: Any) -> str:
+    """
+    Safely extract clean markdown/plain text from an LLM response.
+    Handles string output, multimodal list of content blocks (e.g. [{'type': 'text', 'text': '...'}]),
+    stringified data structures, and dictionary structures returned by newer LangChain Google GenAI versions.
+    """
+    if isinstance(content, str):
+        trimmed = content.strip()
+        # If the string is a stringified list or dict, parse it
+        if (trimmed.startswith("[{") and trimmed.endswith("}]")) or (trimmed.startswith("{'") and trimmed.endswith("'}")):
+            try:
+                parsed = ast.literal_eval(trimmed)
+                return extract_text_from_llm_response(parsed)
+            except Exception:
+                pass
+        return trimmed
+
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                # Check for standard content block keys: 'text', 'content'
+                if "text" in block and block["text"]:
+                    parts.append(str(block["text"]))
+                elif "content" in block and block["content"]:
+                    parts.append(str(block["content"]))
+            elif hasattr(block, "text") and block.text:
+                parts.append(str(block.text))
+        if parts:
+            return "\n".join(parts).strip()
+
+    if isinstance(content, dict):
+        if "text" in content and content["text"]:
+            return str(content["text"]).strip()
+        if "content" in content and content["content"]:
+            return str(content["content"]).strip()
+
+    return str(content).strip()
+
+
 class WebsiteRAG:
     """Quota-efficient, conversational RAG engine for website analysis."""
 
@@ -202,7 +245,8 @@ class WebsiteRAG:
 
         try:
             response = self.llm.invoke(messages)
-            return {"answer": response.content}
+            clean_answer = extract_text_from_llm_response(response.content)
+            return {"answer": clean_answer}
         except Exception as e:
             err_str = str(e)
             if "429" in err_str or "quota" in err_str.lower() or "ResourceExhausted" in err_str:
